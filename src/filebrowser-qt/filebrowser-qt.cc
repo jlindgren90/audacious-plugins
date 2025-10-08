@@ -86,7 +86,13 @@ protected:
                           const QModelIndex & sourceParent) const override
     {
         auto model = qobject_cast<QFileSystemModel *>(sourceModel());
-        if (model->index(model->rootPath()) != sourceParent)
+        auto root = model->index(model->rootPath());
+
+        auto testRoot = sourceParent;
+        while (testRoot != root && testRoot.isValid())
+            testRoot = testRoot.parent();
+
+        if (testRoot != root)
             return true;
 
         return QSortFilterProxyModel::filterAcceptsRow(sourceRow, sourceParent);
@@ -130,6 +136,16 @@ private:
 
 static QPointer<FileBrowserWidget> s_widget;
 
+static void fetchMoreRecursive(QAbstractItemModel * model, const QModelIndex & parent)
+{
+    if (model->canFetchMore(parent))
+        model->fetchMore(parent);
+
+    int rowCount = model->rowCount(parent);
+    for (int row = 0; row < rowCount; row++)
+        fetchMoreRecursive(model, model->index(row, 0, parent));
+}
+
 FileBrowserWidget::FileBrowserWidget()
 {
     m_treeView = new QTreeView(this);
@@ -149,6 +165,7 @@ FileBrowserWidget::FileBrowserWidget()
 
     m_proxyModel = new FileSystemFilterProxyModel(this);
     m_proxyModel->setFilterCaseSensitivity(Qt::CaseInsensitive);
+    m_proxyModel->setRecursiveFilteringEnabled(true);
     m_proxyModel->setSourceModel(m_fileSystemModel);
 
     m_treeView->setModel(m_proxyModel);
@@ -183,6 +200,25 @@ FileBrowserWidget::FileBrowserWidget()
     connect(m_filterLineEdit, &QLineEdit::textChanged,
             [this](const QString & text) {
                 m_proxyModel->setFilterFixedString(text);
+
+                // Recursively try to get the QFileSystemModel to load
+                // more rows. Without this, a chicken-and-egg problem
+                // occurs where no loaded rows match the filter, and the
+                // model doesn't load any more because all parent rows
+                // are filtered.
+                //
+                // FIXME: even with this, it can take several iterations
+                // before all search results are found. We probably need
+                // to run an idle timer to show all results reliably.
+                //
+                auto root = m_proxyModel->mapToSource(m_treeView->rootIndex());
+                if (root.isValid())
+                    fetchMoreRecursive(m_fileSystemModel, root);
+
+                if (text.isEmpty())
+                    m_treeView->collapseAll();
+                else
+                    m_treeView->expandRecursively(m_treeView->rootIndex());
             });
 
     connect(upAction, &QAction::triggered, [this]() {
